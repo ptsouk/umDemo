@@ -1,0 +1,69 @@
+name: myLab-WEU-law.DeployUMOneTime
+
+variables:
+- template: /.global/global.variables.yml
+- name: moduleName
+  value: DeployUMOneTime
+- name: ResourceGroupName
+  value: myLab-westeurope
+- name: workspaceName
+  value: myLab-WEU-law
+- name: automationAccountName
+  value: myLab-WEU-aa
+trigger:
+  batch: true
+  branches:
+    include:
+      - master
+  paths:
+    include:
+    - DeployUMOneTime/*
+    exclude:
+    - /readme.md
+
+stages:
+- stage: DeployUMOneTime
+  jobs:
+  - job:
+    displayName: ${{ variables.moduleName }}
+    pool:
+      ${{ if eq(variables['vmImage'], '') }}:
+        name: $(poolName)
+      ${{ if eq(variables['poolName'], '') }}:
+        vmImage: $(vmImage)
+    steps:
+      - task: AzurePowerShell@4
+        displayName: 'Deploy [${{ variables.workspaceName }}] via connection [$(serviceconnection)]'
+        inputs:
+          azureSubscription: $(serviceConnection)
+          azurePowerShellVersion: LatestVersion
+          ScriptType: InlineScript
+          inline: |
+            if (!(Get-Module -ListAvailable -Name Az.ResourceGraph))
+            {
+              Install-Module -Name Az.ResourceGraph -AllowClobber -Force
+            }            
+            Import-Module Az.ResourceGraph
+            $subscriptionsQuery = "Resourcecontainers | where type =~ 'microsoft.resources/subscriptions'"
+            $updateConfigurationScope = Search-AzGraph -Query $subscriptionsQuery -First 5000 | Select-Object -ExpandProperty id
+
+            $DeploymentInputs = @{
+              Name                      = "$(moduleName)"
+              TemplateFile              = "$(Build.Repository.LocalPath)/$(moduleName)/deployUMOneTime.json"
+              TemplateParameterFile     = "$(Build.Repository.LocalPath)/$(moduleName)/$(workspaceName).deployUMOneTime.parameters.json"
+              DeploymentDebugLogLevel   = "All"
+              Verbose                   = $true
+              ErrorAction               = "Stop"
+              OutVariable               = "output"
+              ResourceGroupName         = "$(resourceGroupName)"
+              automationAccountName     = "$(automationAccountName)"
+              workspaceName             = "$(workspaceName)"
+              updateConfigurationScope  = $updateConfigurationScope
+            }
+
+            New-AzResourceGroupDeployment @DeploymentInputs 
+            $output | Out-File "./$(workspaceName)_output.json" -Force -ErrorAction Stop
+      - task: PublishPipelineArtifact@1
+        inputs:
+          targetPath: $(System.DefaultWorkingDirectory)/$(workspaceName)_output.json
+          artifactName: output

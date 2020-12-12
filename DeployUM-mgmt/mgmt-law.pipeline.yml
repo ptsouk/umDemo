@@ -1,0 +1,121 @@
+name: mgmt-law
+
+variables:
+- template: /.global/global.variables.yml
+- name: moduleName
+  value: DeployUM-mgmt
+- name: managementWorkspaceResourceGroupName
+  value: myLab-mgmt-rg
+- name: managementWorkspaceName
+  value: myLab-mgmt-law
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - master
+  paths:
+    include:
+    - DeployUM-mgmt/*
+    exclude:
+    - /readme.md
+
+stages:
+- stage: Deploy
+  jobs:
+  - job: Deploy
+    displayName: ${{ variables.moduleName }}
+    pool:
+      ${{ if eq(variables['vmImage'], '') }}:
+        name: $(poolName)
+      ${{ if eq(variables['poolName'], '') }}:
+        vmImage: $(vmImage)
+    steps:
+      - task: AzurePowerShell@4
+        displayName: 'Deploy [${{ variables.managementWorkspaceName }}] via connection [$(serviceconnection)]'
+        inputs:
+          azureSubscription: $(serviceConnection)
+          azurePowerShellVersion: LatestVersion
+          ScriptType: InlineScript
+          inline: |
+            if (!(Get-Module -ListAvailable -Name Az.ResourceGraph))
+            {
+              Install-Module -Name Az.ResourceGraph -AllowClobber -Force
+            }     
+            #       
+            Import-Module Az.ResourceGraph
+            
+            # declare the tables we need in each workspace
+            $unionTables = @("Heartbeat", "Update")
+
+            $workspacesQuery = "Resources
+            | where type =~ 'Microsoft.OperationalInsights/workspaces'
+            | where tostring(properties.provisioningState) == 'Succeeded'
+            | join kind=inner (ResourceContainers | where type =~ 'microsoft.resources/subscriptions' | project SubscriptionName = name, subscriptionId) on subscriptionId
+            | where resourceGroup startswith 'myLab'
+            | project SubscriptionName, SubscriptionId = subscriptionId, ResourceGroupName = resourceGroup, WorkspaceName = name, WorkspaceId = tostring(properties.customerId)"
+            $workspaces = Search-AzGraph -Query $workspacesQuery
+
+            # get the workspaces that have the tables we need in their schema
+            $workspacesFound = @()
+            foreach ($workspace in $workspaces)
+            {
+                $null = Set-AzContext -SubscriptionObject (Get-AzSubscription -SubscriptionId $workspace.subscriptionId)
+                Write-Output "Checking workspace: $($workspace.WorkspaceName)"
+                
+                $tables = (Get-AzOperationalInsightsSchema -ResourceGroupName $workspace.ResourceGroupName -WorkspaceName $workspace.WorkspaceName).value `
+                            | Select-Object -ExpandProperty OwnerType | Sort-Object -Unique # get the tables from the workspace's schema 
+                
+                if(!(Compare-Object -ReferenceObject $unionTables -DifferenceObject ($unionTables | Where-Object -FilterScript {$_ -in $tables}))) #exclude workspaces that do not include the tables we need
+                {        
+                    $workspacesFound += $workspace
+                }
+                else
+                {
+                    Write-Output "Workspace $($workspace.WorkspaceName) is excluded"    
+                }
+            }
+
+            #initialize the lookup table with leading strings - needs to be created once
+            [string]$TenantId_DataTable_Query = 'datatable (WorkspaceId:string, WorkspaceName:string, ResourceGroupName:string, SubscriptionName:string)' + '['
+            Write-Output "Construct the Union Functions"
+            # initialize the union functions with leading strings
+            [string]$workspacesHeartbeat_Query = 'union isfuzzy=true '
+            [string]$workspacesUpdate_Query = 'union isfuzzy=true '
+            # contruct the strings
+            foreach ($workspace in $workspacesFound)
+            {        
+                [string]$TenantId_DataTable_Query =  $TenantId_DataTable_Query + '"' + $workspace.WorkspaceId + '"' + ', ' + '"' + $workspace.WorkspaceName + '"' + ', ' + '"' + $workspace.ResourceGroupName + '"' + ', ' + '"' + $workspace.SubscriptionName + '"' + ', '
+                [string]$workspacesHeartbeat_Query = $workspacesHeartbeat_Query + '(workspace("' + $workspace.WorkspaceId + '").Heartbeat),'
+                [string]$workspacesUpdate_Query = $workspacesUpdate_Query + '(workspace("' + $workspace.WorkspaceId + '").Update),'
+            }
+
+            # add trailing characters in lookup table
+            [string]$TenantId_DataTable_Query = $TenantId_DataTable_Query + ']'
+            # get the queries and remove trailing characters
+            [string]$workspacesHeartbeat_Query = ($workspacesHeartbeat_Query).TrimEnd(',')
+            [string]$workspacesUpdate_Query = ($workspacesUpdate_Query).TrimEnd(',')
+
+
+            # deploy
+
+            $DeploymentInputs = @{
+              Name                      = "$(moduleName)"
+              TemplateFile              = "$(Build.Repository.LocalPath)/$(moduleName)/deployManagementWorkspace.json"
+              DeploymentDebugLogLevel   = "All"
+              Verbose                   = $true
+              ErrorAction               = "Stop"
+              OutVariable               = "output"
+              ResourceGroupName         = "$(managementWorkspaceResourceGroupName)"
+              workspaceName             = "$(managementWorkspaceName)"
+              TenantId_DataTable_Query  = $TenantId_DataTable_Query
+              workspacesHeartbeat_Query = $workspacesHeartbeat_Query
+              workspacesUpdate_Query    = $workspacesUpdate_Query
+            }
+
+            New-AzResourceGroupDeployment @DeploymentInputs 
+            $output | Out-File "./$(managementWorkspaceName)_output.json" -Force -ErrorAction Stop
+      - task: PublishPipelineArtifact@1
+        inputs:
+          targetPath: $(System.DefaultWorkingDirectory)/$(managementWorkspaceName)_output.json
+          artifactName: output

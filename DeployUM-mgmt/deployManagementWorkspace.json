@@ -1,0 +1,310 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "The name of the Log Analytics Workspace"
+      }
+    },
+    "serviceTier": {
+      "type": "string",
+      "allowedValues": [
+        "Free",
+        "Standalone",
+        "PerNode",
+        "PerGB2018"
+      ],
+      "defaultValue": "PerGB2018",
+      "metadata": {
+        "description": "Service Tier: Free, Standalone, PerNode, or PerGB2018"
+      }
+    },
+    "dataRetention": {
+      "type": "int",
+      "defaultValue": 30,
+      "minValue": 7,
+      "maxValue": 730,
+      "metadata": {
+        "description": "Number of days of retention. Free plans can only have 7 days, Standalone and Log Analytics plans include 30 days for free"
+      }
+    },
+    "TenantId_DataTable_Query": {
+      "type": "string",
+      "metadata": {
+        "description": "Lookup table. It is called from the cross-worskpace queries for the substitution of the workspaceID with the name of the resource group it belongs to."
+      }
+    },
+    "workspacesHeartbeat_Query": {
+      "type": "string",
+      "metadata": {
+        "description": "Function. It is called from the cross-worskpace queries for the union of the Heartbeat log."
+      }
+    },
+    "workspacesUpdate_Query": {
+      "type": "string",
+      "metadata": {
+        "description": "Function. It is called from the cross-worskpace queries for the union of the Update log."
+      }
+    }
+  },
+  "variables": {
+    "apiVersion": {
+      "workspaces": "2020-03-01-preview",
+      "savedSearches": "2020-08-01"
+    },
+    "FunctionProperties": {
+      "workspacesHeartbeat_name": "workspacesHeartbeat",
+      "workspacesHeartbeat_DisplayName": "Workspaces Heartbeat",
+      "workspacesHeartbeat_FunctionAlias": "workspacesHeartbeat",
+      "workspacesUpdate_name": "workspacesUpdate",
+      "workspacesUpdate_DisplayName": "Workspaces Update",
+      "workspacesUpdate_FunctionAlias": "workspacesUpdate"
+    }
+  },
+  "resources": [
+    {
+      "apiVersion": "[variables('apiVersion').workspaces]",
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "name": "[parameters('workspaceName')]",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "sku": {
+          "Name": "[parameters('serviceTier')]"
+        },
+        "retentionInDays": "[parameters('dataRetention')]"
+      },
+      "resources": [
+        {
+          "type": "savedSearches",
+          "apiVersion": "[variables('apiVersion').savedSearches]",
+          "name": "missing_updates_summary",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "Category": "Cross-Workspace Updates Queries",
+            "DisplayName": "Missing Updates Summary",
+            "etag": "*",
+            "Query": "workspacesUpdate\r\n| where TimeGenerated>ago(5h) and OSType==\"Linux\" and SourceComputerId in ((workspacesHeartbeat\r\n| where TimeGenerated>ago(12h) and OSType==\"Linux\" and notempty(Computer)\r\n| summarize arg_max(TimeGenerated, Solutions) by SourceComputerId\r\n| where Solutions has \"updates\"\r\n| distinct SourceComputerId))\r\n| summarize hint.strategy=partitioned arg_max(TimeGenerated, UpdateState, Classification) by Computer, SourceComputerId, Product, ProductArch\r\n| where UpdateState=~\"Needed\"\r\n| summarize by Product, ProductArch, Classification\r\n| union (workspacesUpdate\r\n| where TimeGenerated>ago(14h) and OSType!=\"Linux\" and (Optional==false or Classification has \"Critical\" or Classification has \"Security\") and SourceComputerId in ((workspacesHeartbeat\r\n| where TimeGenerated>ago(12h) and OSType=~\"Windows\" and notempty(Computer)\r\n| summarize arg_max(TimeGenerated, Solutions) by SourceComputerId\r\n| where Solutions has \"updates\"\r\n| distinct SourceComputerId))\r\n| summarize hint.strategy=partitioned arg_max(TimeGenerated, UpdateState, Classification, Approved) by Computer, SourceComputerId, UpdateID\r\n| where UpdateState=~\"Needed\" and Approved!=false\r\n| summarize by UpdateID, Classification )\r\n| summarize allUpdatesCount=count(), criticalUpdatesCount=countif(Classification has \"Critical\"), securityUpdatesCount=countif(Classification has \"Security\"), otherUpdatesCount=countif(Classification !has \"Critical\" and Classification !has \"Security\")",
+            "Version": 2
+          }
+        },
+        {
+          "type": "savedSearches",
+          "apiVersion": "[variables('apiVersion').savedSearches]",
+          "name": "agents",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "Category": "Cross-Workspace Agents Queries",
+            "DisplayName": "Agents",
+            "etag": "*",
+            "Query": "let Id = TenantIdDataTable;\r\nworkspacesHeartbeat\r\n| where TimeGenerated > ago(1d)\r\n| summarize arg_max(TimeGenerated, *) by SourceComputerId\r\n| extend WorkspaceId = TenantId\r\n| join kind=leftouter(Id) on WorkspaceId \r\n| project SubscriptionName, ResourceGroupName, WorkspaceName, TimeGenerated, Computer, OSType, ComputerIP, RemoteIPCountry, Category\r\n| sort by TimeGenerated asc\r\n| render table",
+            "Version": 2
+          }
+        },
+        {
+          "type": "savedSearches",
+          "apiVersion": "[variables('apiVersion').savedSearches]",
+          "name": "Agents_Heartbeating_Per_Workspace",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "Category": "Cross-Workspace Agents Queries",
+            "DisplayName": "Agents Heartbeating Per Workspace",
+            "etag": "*",
+            "Query": "let Id = TenantIdDataTable;\r\nworkspacesHeartbeat\r\n| summarize arg_max(TimeGenerated, *) by SourceComputerId\r\n| extend WorkspaceId = TenantId\r\n| join kind=leftouter(Id) on WorkspaceId \r\n| summarize count() by WorkspaceName\r\n| render piechart ",
+            "Version": 2
+          }
+        },
+        {
+          "type": "savedSearches",
+          "apiVersion": "[variables('apiVersion').savedSearches]",
+          "name": "agents_heartbeating_without_update_solution_piechart",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "Category": "Cross-Workspace Updates Queries",
+            "DisplayName": "Agents Heartbeating Without Update Solution piechart",
+            "etag": "*",
+            "Query": "let Id = TenantIdDataTable;\r\nworkspacesHeartbeat\r\n| summarize arg_max(TimeGenerated, *) by SourceComputerId\r\n| where Solutions !has \"updates\"\r\n| extend WorkspaceId = TenantId\r\n| join kind=leftouter(Id) on WorkspaceId \r\n| summarize count() by WorkspaceName\r\n| render piechart ",
+            "Version": 2
+          }
+        },
+        {
+          "type": "savedSearches",
+          "apiVersion": "[variables('apiVersion').savedSearches]",
+          "name": "agents_heartbeating_without_update_solution_table",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "Category": "Cross-Workspace Updates Queries",
+            "DisplayName": "Agents Heartbeating Without Update Solution table",
+            "etag": "*",
+            "Query": "let Id = TenantIdDataTable;\r\nworkspacesHeartbeat\r\n| summarize arg_max(TimeGenerated, *) by SourceComputerId\r\n| where Solutions !has \"updates\"\r\n| extend WorkspaceId = TenantId\r\n| join kind=leftouter(Id) on WorkspaceId \r\n| project SubscriptionName, ResourceGroupName, WorkspaceName, TimeGenerated, Computer, OSType, ComputerIP, RemoteIPCountry, Category\r\n| sort by TimeGenerated desc\r\n| render table",
+            "Version": 2
+          }
+        },
+        {
+          "type": "savedSearches",
+          "apiVersion": "[variables('apiVersion').savedSearches]",
+          "name": "computers_needing_updates_per_workspace",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "Category": "Cross-Workspace Updates Queries",
+            "DisplayName": "Computers Needing Updates Per WorkSpace",
+            "etag": "*",
+            "Query": "let Id = TenantIdDataTable;\r\nworkspacesHeartbeat\r\n| where TimeGenerated>ago(12h) and OSType==\"Linux\" and notempty(Computer)\r\n| summarize arg_max(TimeGenerated, Solutions, Computer, ResourceId, ComputerEnvironment, VMUUID, TenantId) by SourceComputerId\r\n| extend WorkspaceId = TenantId\r\n| join kind=leftouter(Id) on WorkspaceId\r\n| where Solutions has \"updates\"\r\n| extend vmuuId=VMUUID, azureResourceId=ResourceId, osType=1, environment=iff(ComputerEnvironment=~\"Azure\", 1, 2), scopedToUpdatesSolution=true, lastUpdateAgentSeenTime=\"\"\r\n| join kind=leftouter\r\n(\r\n    workspacesUpdate\r\n    | where TimeGenerated>ago(5h) and OSType==\"Linux\" and SourceComputerId in ((workspacesHeartbeat\r\n    | where TimeGenerated>ago(12h) and OSType==\"Linux\" and notempty(Computer)\r\n    | summarize arg_max(TimeGenerated, Solutions) by SourceComputerId\r\n    | where Solutions has \"updates\"\r\n    | distinct SourceComputerId))\r\n    | summarize hint.strategy=partitioned arg_max(TimeGenerated, UpdateState, Classification, Product, Computer, ComputerEnvironment) by SourceComputerId, Product, ProductArch\r\n    | summarize Computer=any(Computer), ComputerEnvironment=any(ComputerEnvironment), missingCriticalUpdatesCount=countif(Classification has \"Critical\" and UpdateState=~\"Needed\"), missingSecurityUpdatesCount=countif(Classification has \"Security\" and UpdateState=~\"Needed\"), missingOtherUpdatesCount=countif(Classification !has \"Critical\" and Classification !has \"Security\" and UpdateState=~\"Needed\"), lastAssessedTime=max(TimeGenerated), lastUpdateAgentSeenTime=\"\" by SourceComputerId\r\n    | extend compliance=iff(missingCriticalUpdatesCount > 0 or missingSecurityUpdatesCount > 0, 2, 1)\r\n    | extend ComplianceOrder=iff(missingCriticalUpdatesCount > 0 or missingSecurityUpdatesCount > 0 or missingOtherUpdatesCount > 0, 1, 3)\r\n)\r\non SourceComputerId\r\n| project WorkspaceName, displayName=Computer, sourceComputerId=SourceComputerId, missingCriticalUpdatesCount=coalesce(missingCriticalUpdatesCount, -1), missingSecurityUpdatesCount=coalesce(missingSecurityUpdatesCount, -1), missingOtherUpdatesCount=coalesce(missingOtherUpdatesCount, -1), compliance=coalesce(compliance, 4), lastAssessedTime, lastUpdateAgentSeenTime, osType=\"Linux\", environment=iff(ComputerEnvironment=~\"Azure\", 1, 2), ComplianceOrder=coalesce(ComplianceOrder, 2)\r\n| union(workspacesHeartbeat\r\n| where TimeGenerated>ago(12h) and OSType=~\"Windows\" and notempty(Computer)\r\n| summarize arg_max(TimeGenerated, Solutions, Computer, ResourceId, ComputerEnvironment, VMUUID, TenantId) by SourceComputerId\r\n| extend WorkspaceId = TenantId\r\n| join kind=leftouter(Id) on WorkspaceId\r\n| where Solutions has \"updates\"\r\n| extend vmuuId=VMUUID, azureResourceId=ResourceId, osType=2, environment=iff(ComputerEnvironment=~\"Azure\", 1, 2), scopedToUpdatesSolution=true, lastUpdateAgentSeenTime=\"\"\r\n| join kind=leftouter\r\n(\r\n    workspacesUpdate\r\n    | where TimeGenerated>ago(14h) and OSType!=\"Linux\" and SourceComputerId in ((workspacesHeartbeat\r\n    | where TimeGenerated>ago(12h) and OSType=~\"Windows\" and notempty(Computer)\r\n    | summarize arg_max(TimeGenerated, Solutions) by SourceComputerId\r\n    | where Solutions has \"updates\"\r\n    | distinct SourceComputerId))\r\n    | summarize hint.strategy=partitioned arg_max(TimeGenerated, UpdateState, Classification, Title, Optional, Approved, Computer, ComputerEnvironment) by Computer, SourceComputerId, UpdateID\r\n    | summarize Computer=any(Computer), ComputerEnvironment=any(ComputerEnvironment), missingCriticalUpdatesCount=countif(Classification has \"Critical\" and UpdateState=~\"Needed\" and Approved!=false), missingSecurityUpdatesCount=countif(Classification has \"Security\" and UpdateState=~\"Needed\" and Approved!=false), missingOtherUpdatesCount=countif(Classification !has \"Critical\" and Classification !has \"Security\" and UpdateState=~\"Needed\" and Optional==false and Approved!=false), lastAssessedTime=max(TimeGenerated), lastUpdateAgentSeenTime=\"\" by SourceComputerId\r\n    | extend compliance=iff(missingCriticalUpdatesCount > 0 or missingSecurityUpdatesCount > 0, 2, 1)\r\n    | extend ComplianceOrder=iff(missingCriticalUpdatesCount > 0 or missingSecurityUpdatesCount > 0 or missingOtherUpdatesCount > 0, 1, 3)\r\n)\r\non SourceComputerId\r\n| project WorkspaceName, displayName=Computer, sourceComputerId=SourceComputerId, missingCriticalUpdatesCount=coalesce(missingCriticalUpdatesCount, -1), missingSecurityUpdatesCount=coalesce(missingSecurityUpdatesCount, -1), missingOtherUpdatesCount=coalesce(missingOtherUpdatesCount, -1), compliance=coalesce(compliance, 4), lastAssessedTime, lastUpdateAgentSeenTime, osType=\"Windows\", environment=iff(ComputerEnvironment=~\"Azure\", 1, 2), ComplianceOrder=coalesce(ComplianceOrder, 2) )\r\n| order by ComplianceOrder asc, missingCriticalUpdatesCount desc, missingSecurityUpdatesCount desc, missingOtherUpdatesCount desc, displayName asc\r\n| project-away ComplianceOrder\r\n| summarize count() by WorkspaceName\r\n| render piechart",
+            "Version": 2
+          }
+        },
+        {
+          "type": "savedSearches",
+          "apiVersion": "[variables('apiVersion').savedSearches]",
+          "name": "missing_hearbeats_(older_than_3_hours)",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "Category": "Cross-Workspace Agents Queries",
+            "DisplayName": "Missing Hearbeats (older than 3 hours)",
+            "etag": "*",
+            "Query": "let Id = TenantIdDataTable;\r\nworkspacesHeartbeat\r\n| summarize lastHeartbeat = arg_max(TimeGenerated, *) by SourceComputerId\r\n| extend WorkspaceId = TenantId\r\n| join kind=leftouter(Id) on WorkspaceId \r\n| project SubscriptionName, ResourceGroupName, WorkspaceName, lastHeartbeat, Computer, OSType, ComputerIP, RemoteIPCountry, Category\r\n| where lastHeartbeat < ago(3h)\r\n| sort by lastHeartbeat asc \r\n| render table",
+            "Version": 2
+          }
+        },
+        {
+          "type": "savedSearches",
+          "apiVersion": "[variables('apiVersion').savedSearches]",
+          "name": "missing_updates_list",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "Category": "Cross-Workspace Updates Queries",
+            "DisplayName": "Missing Updates List",
+            "etag": "*",
+            "Query": "workspacesUpdate\r\n| where TimeGenerated>ago(5h) and OSType==\"Linux\" and SourceComputerId in ((workspacesHeartbeat\r\n| where TimeGenerated>ago(12h) and OSType==\"Linux\" and notempty(Computer)\r\n| summarize arg_max(TimeGenerated, Solutions) by SourceComputerId\r\n| where Solutions has \"updates\"\r\n| distinct SourceComputerId))\r\n| summarize hint.strategy=partitioned arg_max(TimeGenerated, UpdateState, Classification, BulletinUrl, BulletinID) by SourceComputerId, Product, ProductArch\r\n| where UpdateState=~\"Needed\"\r\n| project-away UpdateState, TimeGenerated\r\n| summarize computersCount=dcount(SourceComputerId, 2), ClassificationWeight=max(iff(Classification has \"Critical\", 4, iff(Classification has \"Security\", 2, 1))) by id=strcat(Product, \"_\", ProductArch), displayName=Product, productArch=ProductArch, classification=Classification, InformationId=BulletinID, InformationUrl=tostring(split(BulletinUrl, \";\", 0)[0]), osType=\"Linux\"\r\n| union(workspacesUpdate\r\n| where TimeGenerated>ago(14h) and OSType!=\"Linux\" and (Optional==false or Classification has \"Critical\" or Classification has \"Security\") and SourceComputerId in ((workspacesHeartbeat\r\n| where TimeGenerated>ago(12h) and OSType=~\"Windows\" and notempty(Computer)\r\n| summarize arg_max(TimeGenerated, Solutions) by SourceComputerId\r\n| where Solutions has \"updates\"\r\n| distinct SourceComputerId))\r\n| summarize hint.strategy=partitioned arg_max(TimeGenerated, UpdateState, Classification, Title, KBID, PublishedDate, Approved) by Computer, SourceComputerId, UpdateID\r\n| where UpdateState=~\"Needed\" and Approved!=false\r\n| project-away UpdateState, Approved, TimeGenerated\r\n| summarize computersCount=dcount(SourceComputerId, 2), displayName=any(Title), publishedDate=min(PublishedDate), ClassificationWeight=max(iff(Classification has \"Critical\", 4, iff(Classification has \"Security\", 2, 1))) by id=strcat(UpdateID, \"_\", KBID), classification=Classification, InformationId=strcat(\"KB\", KBID), InformationUrl=iff(isnotempty(KBID), strcat(\"https://support.microsoft.com/kb/\", KBID), \"\"), osType=\"Windows\")\r\n| sort by ClassificationWeight desc, computersCount desc, displayName asc\r\n| extend informationLink=(iff(isnotempty(InformationId) and isnotempty(InformationUrl), toobject(strcat('{ \"uri\": \"', InformationUrl, '\", \"text\": \"', InformationId, '\", \"target\": \"blank\" }')), toobject('')))\r\n| project-away ClassificationWeight, InformationId, InformationUrl",
+            "Version": 2
+          }
+        },
+        {
+          "type": "savedSearches",
+          "apiVersion": "[variables('apiVersion').savedSearches]",
+          "name": "computers_list",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "Category": "Cross-Workspace Updates Queries",
+            "DisplayName": "Computers List",
+            "etag": "*",
+            "Query": "let Id = TenantIdDataTable;\r\nworkspacesHeartbeat\r\n| where TimeGenerated>ago(12h) and OSType==\"Linux\" and notempty(Computer)\r\n| summarize arg_max(TimeGenerated, Solutions, Computer, ResourceId, ComputerEnvironment, VMUUID, TenantId) by SourceComputerId\r\n| extend WorkspaceId = TenantId\r\n| join kind=leftouter(Id) on WorkspaceId\r\n| where Solutions has \"updates\"\r\n| extend vmuuId=VMUUID, azureResourceId=ResourceId, osType=\"Linux\", environment=iff(ComputerEnvironment=~\"Azure\", \"Azure\", \"Non-Azure\"), scopedToUpdatesSolution=true, lastUpdateAgentSeenTime=\"\"\r\n| join kind=leftouter\r\n(\r\n    workspacesUpdate\r\n    | where TimeGenerated>ago(5h) and OSType==\"Linux\" and SourceComputerId in ((workspacesHeartbeat\r\n    | where TimeGenerated>ago(12h) and OSType==\"Linux\" and notempty(Computer)\r\n    | summarize arg_max(TimeGenerated, Solutions) by SourceComputerId\r\n    | where Solutions has \"updates\"\r\n    | distinct SourceComputerId))\r\n    | summarize hint.strategy=partitioned arg_max(TimeGenerated, UpdateState, Classification, Product, Computer, ComputerEnvironment) by SourceComputerId, Product, ProductArch\r\n    | summarize Computer=any(Computer), ComputerEnvironment=any(ComputerEnvironment), missingCriticalUpdatesCount=countif(Classification has \"Critical\" and UpdateState=~\"Needed\"), missingSecurityUpdatesCount=countif(Classification has \"Security\" and UpdateState=~\"Needed\"), missingOtherUpdatesCount=countif(Classification !has \"Critical\" and Classification !has \"Security\" and UpdateState=~\"Needed\"), lastAssessedTime=max(TimeGenerated), lastUpdateAgentSeenTime=\"\" by SourceComputerId\r\n    | extend compliance=iff(missingCriticalUpdatesCount > 0 or missingSecurityUpdatesCount > 0, 2, 1)\r\n    | extend ComplianceOrder=iff(missingCriticalUpdatesCount > 0 or missingSecurityUpdatesCount > 0 or missingOtherUpdatesCount > 0, 1, 3)\r\n)\r\non SourceComputerId\r\n| project WorkspaceName, Computer, SourceComputerId, scopedToUpdatesSolution=true, missingCriticalUpdatesCount=coalesce(missingCriticalUpdatesCount, -1), missingSecurityUpdatesCount=coalesce(missingSecurityUpdatesCount, -1), missingOtherUpdatesCount=coalesce(missingOtherUpdatesCount, -1), compliance=coalesce(compliance, 4), lastAssessedTime, lastUpdateAgentSeenTime, osType=\"Linux\", environment=iff(ComputerEnvironment=~\"Azure\", \"Azure\", \"Non-Azure\"), ComplianceOrder=coalesce(ComplianceOrder, 2)\r\n| union(workspacesHeartbeat\r\n| where TimeGenerated>ago(12h) and OSType=~\"Windows\" and notempty(Computer)\r\n| summarize arg_max(TimeGenerated, Solutions, Computer, ResourceId, ComputerEnvironment, VMUUID, TenantId) by SourceComputerId\r\n| extend WorkspaceId = TenantId\r\n| join kind=leftouter(Id) on WorkspaceId\r\n| where Solutions has \"updates\"\r\n| extend vmuuId=VMUUID, azureResourceId=ResourceId, osType=\"Windows\", environment=iff(ComputerEnvironment=~\"Azure\", \"Azure\", \"Non-Azure\"), scopedToUpdatesSolution=true, lastUpdateAgentSeenTime=\"\"\r\n| join kind=leftouter\r\n(\r\n    workspacesUpdate\r\n    | where TimeGenerated>ago(14h) and OSType!=\"Linux\" and SourceComputerId in ((workspacesHeartbeat\r\n    | where TimeGenerated>ago(12h) and OSType=~\"Windows\" and notempty(Computer)\r\n    | summarize arg_max(TimeGenerated, Solutions) by SourceComputerId\r\n    | where Solutions has \"updates\"\r\n    | distinct SourceComputerId))\r\n    | summarize hint.strategy=partitioned arg_max(TimeGenerated, UpdateState, Classification, Title, Optional, Approved, Computer, ComputerEnvironment) by Computer, SourceComputerId, UpdateID\r\n    | summarize Computer=any(Computer), ComputerEnvironment=any(ComputerEnvironment), missingCriticalUpdatesCount=countif(Classification has \"Critical\" and UpdateState=~\"Needed\" and Approved!=false), missingSecurityUpdatesCount=countif(Classification has \"Security\" and UpdateState=~\"Needed\" and Approved!=false), missingOtherUpdatesCount=countif(Classification !has \"Critical\" and Classification !has \"Security\" and UpdateState=~\"Needed\" and Optional==false and Approved!=false), lastAssessedTime=max(TimeGenerated), lastUpdateAgentSeenTime=\"\" by SourceComputerId\r\n    | extend compliance=iff(missingCriticalUpdatesCount > 0 or missingSecurityUpdatesCount > 0, 2, 1)\r\n    | extend ComplianceOrder=iff(missingCriticalUpdatesCount > 0 or missingSecurityUpdatesCount > 0 or missingOtherUpdatesCount > 0, 1, 3)\r\n)\r\non SourceComputerId\r\n| project WorkspaceName, Computer, SourceComputerId, scopedToUpdatesSolution=true, missingCriticalUpdatesCount=coalesce(missingCriticalUpdatesCount, -1), missingSecurityUpdatesCount=coalesce(missingSecurityUpdatesCount, -1), missingOtherUpdatesCount=coalesce(missingOtherUpdatesCount, -1), compliance=coalesce(compliance, 4), lastAssessedTime, lastUpdateAgentSeenTime, osType=\"Windows\", environment=iff(ComputerEnvironment=~\"Azure\", \"Azure\", \"Non-Azure\"), ComplianceOrder=coalesce(ComplianceOrder, 2) )\r\n| order by ComplianceOrder asc, missingCriticalUpdatesCount desc, missingSecurityUpdatesCount desc, missingOtherUpdatesCount desc, Computer asc\r\n| project-away ComplianceOrder",
+            "Version": 2
+          }
+        },
+        {
+          "type": "savedSearches",
+          "apiVersion": "[variables('apiVersion').savedSearches]",
+          "name": "computers_summary",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "Category": "Cross-Workspace Updates Queries",
+            "DisplayName": "Computers Summary",
+            "etag": "*",
+            "Query": "workspacesHeartbeat\r\n| where TimeGenerated>ago(12h) and OSType=~\"Windows\" and notempty(Computer)\r\n| summarize arg_max(TimeGenerated, Solutions) by SourceComputerId\r\n| where Solutions has \"updates\"\r\n| distinct SourceComputerId\r\n| join kind=leftouter\r\n(\r\n    workspacesUpdate\r\n    | where TimeGenerated>ago(14h) and OSType!=\"Linux\"\r\n    | summarize hint.strategy=partitioned arg_max(TimeGenerated, UpdateState, Approved, Optional, Classification) by SourceComputerId, UpdateID\r\n    | distinct SourceComputerId, Classification, UpdateState, Approved, Optional\r\n    | summarize WorstMissingUpdateSeverity=max(iff(UpdateState=~\"Needed\" and (Optional==false or Classification has \"Critical\" or Classification has \"Security\") and Approved!=false, iff(Classification has \"Critical\", 4, iff(Classification has \"Security\", 2, 1)), 0)) by SourceComputerId\r\n)\r\non SourceComputerId\r\n| extend WorstMissingUpdateSeverity=coalesce(WorstMissingUpdateSeverity, -1)\r\n| summarize computersBySeverity=count() by WorstMissingUpdateSeverity\r\n| union (workspacesHeartbeat\r\n| where TimeGenerated>ago(12h) and OSType==\"Linux\" and notempty(Computer)\r\n| summarize arg_max(TimeGenerated, Solutions) by SourceComputerId\r\n| where Solutions has \"updates\"\r\n| distinct SourceComputerId\r\n| join kind=leftouter\r\n(\r\n    workspacesUpdate\r\n    | where TimeGenerated>ago(5h) and OSType==\"Linux\"\r\n    | summarize hint.strategy=partitioned arg_max(TimeGenerated, UpdateState, Classification) by SourceComputerId, Product, ProductArch\r\n    | distinct SourceComputerId, Classification, UpdateState\r\n    | summarize WorstMissingUpdateSeverity=max(iff(UpdateState=~\"Needed\", iff(Classification has \"Critical\", 4, iff(Classification has \"Security\", 2, 1)), 0)) by SourceComputerId\r\n)\r\non SourceComputerId\r\n| extend WorstMissingUpdateSeverity=coalesce(WorstMissingUpdateSeverity, -1)\r\n| summarize computersBySeverity=count() by WorstMissingUpdateSeverity)\r\n| summarize assessedComputersCount=sumif(computersBySeverity, WorstMissingUpdateSeverity>-1), notAssessedComputersCount=sumif(computersBySeverity, WorstMissingUpdateSeverity==-1), computersNeedCriticalUpdatesCount=sumif(computersBySeverity, WorstMissingUpdateSeverity==4), computersNeedSecurityUpdatesCount=sumif(computersBySeverity, WorstMissingUpdateSeverity==2), computersNeedOtherUpdatesCount=sumif(computersBySeverity, WorstMissingUpdateSeverity==1), upToDateComputersCount=sumif(computersBySeverity, WorstMissingUpdateSeverity==0)\r\n| summarize assessedComputersCount=sum(assessedComputersCount), computersNeedCriticalUpdatesCount=sum(computersNeedCriticalUpdatesCount),  computersNeedSecurityUpdatesCount=sum(computersNeedSecurityUpdatesCount), computersNeedOtherUpdatesCount=sum(computersNeedOtherUpdatesCount), upToDateComputersCount=sum(upToDateComputersCount), notAssessedComputersCount=sum(notAssessedComputersCount)\r\n| extend allComputersCount=assessedComputersCount+notAssessedComputersCount",
+            "Version": 2
+          }
+        },
+        {
+          "type": "savedSearches",
+          "apiVersion": "[variables('apiVersion').savedSearches]",
+          "name": "TenantId_DataTable",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "Category": "Union Functions",
+            "DisplayName": "TenantId DataTable",
+            "etag": "*",
+            "Query": "[parameters('TenantId_DataTable_Query')]",
+            "FunctionAlias": "TenantIdDataTable",
+            "Version": 2
+          }
+        },
+        {
+          "type": "savedSearches",
+          "apiVersion": "[variables('apiVersion').savedSearches]",
+          "name": "[variables('FunctionProperties').workspacesHeartbeat_name]",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "Category": "Union Functions",
+            "DisplayName": "[variables('FunctionProperties').workspacesHeartbeat_DisplayName]",
+            "etag": "*",
+            "Query": "[parameters('workspacesHeartbeat_Query')]",
+            "FunctionAlias": "[variables('FunctionProperties').workspacesHeartbeat_FunctionAlias]",
+            "Version": 2
+          }
+        },
+        {
+          "type": "savedSearches",
+          "apiVersion": "[variables('apiVersion').savedSearches]",
+          "name": "[variables('FunctionProperties').workspacesUpdate_name]",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "Category": "Union Functions",
+            "DisplayName": "[variables('FunctionProperties').workspacesUpdate_DisplayName]",
+            "etag": "*",
+            "Query": "[parameters('workspacesUpdate_Query')]",
+            "FunctionAlias": "[variables('FunctionProperties').workspacesUpdate_FunctionAlias]",
+            "Version": 2
+          }
+        }
+      ]
+    }    
+  ],
+  "outputs": {
+    "workspaceName": {
+      "type": "string",
+      "value": "[parameters('workspaceName')]"
+    },
+    "provisioningState": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), variables('apiVersion').workspaces).provisioningState]"
+    },
+    "source": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), variables('apiVersion').workspaces).source]"
+    },
+    "customerId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), variables('apiVersion').workspaces).customerId]"
+    },
+    "pricingTier": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), variables('apiVersion').workspaces).sku.name]"
+    },
+    "retentionInDays": {
+      "type": "int",
+      "value": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), variables('apiVersion').workspaces).retentionInDays]"
+    },
+    "listKeys": {
+      "value": "[listKeys(parameters('workspaceName'), variables('apiVersion').workspaces)]",
+      "type": "object"
+    }
+  }
+}

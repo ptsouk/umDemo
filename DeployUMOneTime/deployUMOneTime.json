@@ -1,0 +1,334 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "The name of the Log Analytics Workspace"
+      }
+    },
+    "serviceTier": {
+      "type": "string",
+      "allowedValues": [
+        "Free",
+        "Standalone",
+        "PerNode",
+        "PerGB2018",
+        "capacityreservation"
+      ],
+      "metadata": {
+        "description": "The name of the SKU. - Free, Standalone, PerNode, PerGB2018, CapacityReservation"
+      }
+    },
+    "capacityReservationLevel": {
+      "type": "int",
+      "allowedValues": [
+        100,
+        200,
+        300,
+        400,
+        500
+      ],
+      "defaultValue": 100,
+      "metadata": {
+        "description": "If using CapacityReservation SKU - this is the size of data in GB"
+      }
+    },
+    "dataRetention": {
+      "type": "int",
+      "defaultValue": 30,
+      "minValue": 7,
+      "maxValue": 730,
+      "metadata": {
+        "description": "Number of days of retention"
+      }
+    },
+    "automationAccountName": {
+      "type": "string",
+      "metadata": {
+        "description": "The name of the Azure Automation Account"
+      }
+    },
+    "updateDefaultScheduleStartTime": {
+      "type": "string",
+      "metadata": {
+        "description": "The start time of the deployed as default update schedules"
+      }
+    },
+    "scheduletimeZone": {
+      "type": "string",
+      "metadata": {
+        "description": "Gets or sets the time zone of the schedule"
+      }
+    },
+    "maintenanceWindow": {
+      "type": "string",
+      "metadata": {
+        "description": "Maximum time allowed for the software update configuration run. Duration needs to be specified using the format PT[n]H[n]M[n]S as per ISO8601"
+      }
+    },
+    "updateDefaultScheduleInterval": {
+      "type": "int",
+      "metadata": {
+        "description": "sets the interval of the schedule"
+      }
+    },
+    "updateDefaultSchedulefrequency": {
+      "type": "string",
+      "metadata": {
+        "description": "sets the frequency of the schedule. - OneTime, Day, Hour, Week, Month, Minute"
+      }
+    },
+    "scheduleIsEnabled": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Gets or sets a value indicating whether this schedule is enabled"
+      }
+    },
+    "updateConfigurationScope": {
+      "type": "array",
+      "metadata": {
+        "description": "Subscriptions to use for scoping the Update configurations"
+      }
+    },
+    "updateDefaultSchedulefilterOperator": {
+      "type": "string",
+      "metadata": {
+        "description": "Filter VMs by Any or All specified tags. - All or Any"
+      }
+    },
+    "softwareUpdateConfigurations": {
+      "type": "array",
+      "minLength": 1,
+      "metadata": {
+          "description": "An Array with 1 or more software update configurations"
+      }
+    }, 
+    "resourceTags":{
+    "type": "object",
+    "metadata": {
+      "description": "Resource Tags - Tagging should normally be done at the Resource Group Level as a minimum"
+    }
+}
+  },
+  "variables": {
+    "apiVersion": {
+      "workspaces": "2020-03-01-preview",
+      "solutions": "2015-11-01-preview",
+      "automation": "2015-10-31",
+      "linkedServices": "2020-03-01-preview",
+      "softwareUpdateConfigurations": "2017-05-15-preview",
+      "deployments": "2019-10-01"
+    },
+    "Updates": {
+      "Name": "[Concat('Updates', '(', parameters('workspaceName'), ')')]",
+      "GalleryName": "Updates"
+    }
+  },
+  "resources": [ 
+    {
+      "apiVersion": "[variables('apiVersion').workspaces]",
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "name": "[parameters('workspaceName')]",
+      "tags": "[parameters('resourceTags')]",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "sku": {    
+          "name": "[parameters('serviceTier')]",
+          "capacityReservationLevel": "[if(equals(parameters('serviceTier'), 'capacityreservation'), parameters('capacityReservationLevel'), json('null') )]"
+        },        
+        "retentionInDays": "[parameters('dataRetention')]"
+      },
+      "resources": [
+        {
+          "apiVersion": "[variables('apiVersion').solutions]",
+          "location": "[resourceGroup().location]",
+          "name": "[variables('Updates').Name]",
+          "tags": "[parameters('resourceTags')]",
+          "type": "Microsoft.OperationsManagement/solutions",
+          "id": "[concat('/subscriptions/', subscription().subscriptionId, '/resourceGroups/', resourceGroup().name, '/providers/Microsoft.OperationsManagement/solutions/', variables('Updates').Name)]",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "workspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          },
+          "plan": {
+            "name": "[variables('Updates').Name]",
+            "publisher": "Microsoft",
+            "product": "[Concat('OMSGallery/', variables('Updates').GalleryName)]",
+            "promotionCode": ""
+          }
+        },
+        {
+          "apiVersion": "[variables('apiVersion').automation]",
+          "type": "Microsoft.Automation/automationAccounts",
+          "name": "[parameters('automationAccountName')]",
+          "tags": "[parameters('resourceTags')]",
+          "location": "[resourceGroup().location]",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]"
+          ],
+          "properties": {
+            "sku": {
+              "name": "Basic"
+            }
+          }
+        },
+        {
+          "apiVersion": "[variables('apiVersion').linkedServices]",
+          "type": "Microsoft.OperationalInsights/workspaces/linkedServices",
+          "name": "[concat(parameters('workspaceName'), '/' , 'Automation')]",
+          "tags": "[parameters('resourceTags')]",
+          "location": "[resourceGroup().location]",
+          "dependsOn": [
+            "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]",
+            "[concat('Microsoft.Automation/automationAccounts/', parameters('automationAccountName'))]"
+          ],
+          "properties": {
+            "resourceId": "[resourceId('Microsoft.Automation/automationAccounts/', parameters('automationAccountName'))]"
+          }
+        }    
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "[variables('apiVersion').deployments]",
+      "name": "[concat(parameters('automationAccountName'), '-', parameters('softwareUpdateConfigurations')[copyIndex()].properties.updateConfiguration.operatingSystem, parameters('softwareUpdateConfigurations')[copyIndex()].name)]",
+      "copy": {
+          "name": "softwareUpdateConfigurationsCopy",
+          "count": "[length(parameters('softwareUpdateConfigurations'))]"
+      },
+      "dependsOn": [
+          "[concat('Microsoft.Automation/automationAccounts/', parameters('automationAccountName'))]"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "resources": [
+            {
+              "name": "[concat(parameters('automationAccountName'), '/', 'Windows', parameters('softwareUpdateConfigurations')[copyIndex()].name)]",
+              "type": "Microsoft.Automation/automationAccounts/softwareUpdateConfigurations",
+              "apiVersion": "[variables('apiVersion').softwareUpdateConfigurations]",
+              "condition": "[equals(parameters('softwareUpdateConfigurations')[copyIndex()].properties.updateConfiguration.operatingSystem, 'Windows')]",
+              "properties": {
+                "updateConfiguration": {
+                  "operatingSystem": "[parameters('softwareUpdateConfigurations')[copyIndex()].properties.updateConfiguration.operatingSystem]",
+                  "windows": {
+                    "includedUpdateClassifications": "[parameters('softwareUpdateConfigurations')[copyIndex()].properties.updateConfiguration.includedUpdateClassifications]",
+                    "includedKbNumbers": "[parameters('softwareUpdateConfigurations')[copyIndex()].properties.updateConfiguration.includedKbNumbers]",
+                    "rebootSetting": "[parameters('softwareUpdateConfigurations')[copyIndex()].properties.updateConfiguration.rebootSetting]"
+                  },
+                  "duration": "[parameters('maintenanceWindow')]",
+                  "targets": {
+                    "azureQueries": [
+                      {
+                        "scope": "[parameters('updateConfigurationScope')]",
+                        "tagSettings": {
+                          "tags": {
+                            "UpdateRing": [
+                              "[parameters('softwareUpdateConfigurations')[copyIndex()].properties.updateConfiguration.UpdateRing]"
+                            ]                        
+                          },
+                          "filterOperator": "[parameters('updateDefaultSchedulefilterOperator')]"
+                        },
+                        "locations": [
+                          "[resourcegroup().location]"
+                        ]
+                      }
+                    ],
+                    "nonAzureQueries": []
+                  }
+                },
+                "scheduleInfo": {
+                  "startTime": "[parameters('updateDefaultScheduleStartTime')]",
+                  "isEnabled": "[parameters('scheduleIsEnabled')]",
+                  "interval": "[parameters('updateDefaultScheduleInterval')]",
+                  "frequency": "[parameters('softwareUpdateConfigurations')[copyIndex()].properties.scheduleInfo.frequency]",
+                  "timeZone": "[parameters('scheduletimeZone')]"
+                }
+              }
+            },
+            {
+              "name": "[concat(parameters('automationAccountName'), '/', 'Linux', parameters('softwareUpdateConfigurations')[copyIndex()].name)]",
+              "type": "Microsoft.Automation/automationAccounts/softwareUpdateConfigurations",
+              "apiVersion": "[variables('apiVersion').softwareUpdateConfigurations]",
+              "condition": "[equals(parameters('softwareUpdateConfigurations')[copyIndex()].properties.updateConfiguration.operatingSystem, 'Linux')]",
+              "properties": {
+                "updateConfiguration": {
+                  "operatingSystem": "[parameters('softwareUpdateConfigurations')[copyIndex()].properties.updateConfiguration.operatingSystem]",
+                  "linux": {
+                    "includedPackageClassifications": "[parameters('softwareUpdateConfigurations')[copyIndex()].properties.updateConfiguration.includedPackageClassifications]",
+                    "includedKbNumbers": "[parameters('softwareUpdateConfigurations')[copyIndex()].properties.updateConfiguration.includedKbNumbers]",
+                    "rebootSetting": "[parameters('softwareUpdateConfigurations')[copyIndex()].properties.updateConfiguration.rebootSetting]"
+                  },
+                  "duration": "[parameters('maintenanceWindow')]",
+                  "targets": {
+                    "azureQueries": [
+                      {
+                        "scope": "[parameters('updateConfigurationScope')]",
+                        "tagSettings": {
+                          "tags": {
+                            "UpdateRing": [
+                              "[parameters('softwareUpdateConfigurations')[copyIndex()].properties.updateConfiguration.UpdateRing]"
+                            ]                        
+                          },
+                          "filterOperator": "[parameters('updateDefaultSchedulefilterOperator')]"
+                        },
+                        "locations": [
+                          "[resourcegroup().location]"
+                        ]
+                      }
+                    ],
+                    "nonAzureQueries": []
+                  }
+                },
+                "scheduleInfo": {
+                  "startTime": "[parameters('updateDefaultScheduleStartTime')]",
+                  "isEnabled": "[parameters('scheduleIsEnabled')]",
+                  "interval": "[parameters('updateDefaultScheduleInterval')]",
+                  "frequency": "[parameters('softwareUpdateConfigurations')[copyIndex()].properties.scheduleInfo.frequency]",
+                  "timeZone": "[parameters('scheduletimeZone')]"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }  
+  ],
+  "outputs": {
+    "workspaceName": {
+      "type": "string",
+      "value": "[parameters('workspaceName')]"
+    },
+    "provisioningState": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), variables('apiVersion').solutions).provisioningState]"
+    },
+    "source": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), variables('apiVersion').solutions).source]"
+    },
+    "customerId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), variables('apiVersion').solutions).customerId]"
+    },
+    "pricingTier": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), variables('apiVersion').solutions).sku.name]"
+    },
+    "retentionInDays": {
+      "type": "int",
+      "value": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), variables('apiVersion').solutions).retentionInDays]"
+    },
+    "listKeys": {
+      "value": "[listKeys(parameters('workspaceName'), variables('apiVersion').solutions)]",
+      "type": "object"
+    }
+  }
+}
